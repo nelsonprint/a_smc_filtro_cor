@@ -1,0 +1,180 @@
+// ==========================================
+// SMART MONEY CONCEPTS (SMC) TURBINADO + FILTROS + ANTI-LATERALIZAÇÃO
+// ProfitChart - NTSL
+// ==========================================
+
+// ----- Inputs -----
+input
+  MinProporcaoCorpo(0.55);     
+  MaxProporcaoPavio(0.45);     
+  LookbackEstrutura(20);       
+  RiskRR(2.0);                 
+  StopOffset(5);               
+  PeriodoMME(9);               
+  MultCandleLongo(2.0);        
+  CandlesNormalizacao(3);      
+
+  // ---- Inputs Anti-Lateralização ----
+  Media1(10);
+  Media2(70);
+  AfastPts(5.0);
+  InclinacaoPts(8.0);
+
+// ----- Variáveis -----
+var
+  Corpo, PavioSup, PavioInf: float;
+  ProporcaoCorpo, ProporcaoPavioSup, ProporcaoPavioInf: float;
+  CandleAlta, CandleBaixa: boolean;
+
+  HH, HL, LH, LL: boolean;
+  BOS_Alta, BOS_Baixa: boolean;
+
+  MaxHigh, MinLow, Entry, Stop, Target: float;
+  i: integer;
+
+  MediaCorpos, MME9: float;
+  CandleLongo: boolean;
+  CountNormal: integer;
+  MercadoEsticado: boolean;
+
+  // ---- Variáveis Anti-Lateralização ----
+  vMedia1, vMedia2: float;
+  vCor, vCorAnterior: integer;   // clGreen, clRed ou clGray
+  PodeEntrar: boolean;           // valida entrada
+
+// ==========================================
+// INÍCIO
+// ==========================================
+begin
+
+  // ---- Corpo e pavios do candle ----
+  Corpo := abs(close - open);
+  PavioSup := high - max(open, close);
+  PavioInf := min(open, close) - low;
+
+  // ---- Proporções ----
+  if (high - low) > 0 then
+  begin
+    ProporcaoCorpo     := Corpo / (high - low);
+    ProporcaoPavioSup  := PavioSup / (high - low);
+    ProporcaoPavioInf  := PavioInf / (high - low);
+  end
+  else
+  begin
+    ProporcaoCorpo := 0;
+    ProporcaoPavioSup := 0;
+    ProporcaoPavioInf := 0;
+  end;
+
+  // ---- Tipo de candle válido ----
+  CandleAlta := (close > open) and (ProporcaoCorpo >= MinProporcaoCorpo)
+                and (ProporcaoPavioSup <= MaxProporcaoPavio)
+                and (ProporcaoPavioInf <= MaxProporcaoPavio);
+
+  CandleBaixa := (close < open) and (ProporcaoCorpo >= MinProporcaoCorpo)
+                 and (ProporcaoPavioSup <= MaxProporcaoPavio)
+                 and (ProporcaoPavioInf <= MaxProporcaoPavio);
+
+  // ---- Estrutura de mercado ----
+  MaxHigh := high[1];
+  MinLow  := low[1];
+
+  for i := 2 to LookbackEstrutura do
+  begin
+    if high[i] > MaxHigh then MaxHigh := high[i];
+    if low[i]  < MinLow  then MinLow := low[i];
+  end;
+
+  HH := high > MaxHigh;                       
+  LL := low  < MinLow;                        
+  HL := (low > MinLow)  and (close > close[1]);   
+  LH := (high < MaxHigh) and (close < close[1]);  
+
+  BOS_Alta  := HH and CandleAlta;
+  BOS_Baixa := LL and CandleBaixa;
+
+  // ==========================================
+  // FILTROS ADICIONAIS
+  // ==========================================
+  MME9 := Averan(close, PeriodoMME);
+
+  MediaCorpos := Averan(abs(close - open), LookbackEstrutura);
+  CandleLongo := (Corpo > MultCandleLongo * MediaCorpos);
+
+  if CandleLongo then
+    MercadoEsticado := true;
+
+  if MercadoEsticado and (Corpo <= 1.2 * MediaCorpos) then
+    CountNormal := CountNormal + 1
+  else if not MercadoEsticado then
+    CountNormal := 0;
+
+  if CountNormal >= CandlesNormalizacao then
+  begin
+    MercadoEsticado := false;
+    CountNormal := 0;
+  end;
+
+  // ==========================================
+  // ANTI-LATERALIZAÇÃO
+  // ==========================================
+  vMedia1 := MediaExp(Media1, close);
+  vMedia2 := MediaExp(Media2, close);
+
+  if (vMedia2 > vMedia2[3] + InclinacaoPts) then
+    vCor := clGreen
+  else if (vMedia2 < vMedia2[3] - InclinacaoPts) then
+    vCor := clRed
+  else
+    vCor := clGray;
+
+  // ---- Trava usando a cor do candle anterior ----
+  vCorAnterior := vCor[1];          // cor concluída do candle anterior
+  PodeEntrar := (vCorAnterior <> clGray);
+
+  // ---- Coloração e plots ----
+  PaintBar(vCor);
+  Plot(vMedia1);
+  Plot2(vMedia2);
+
+  // ==========================================
+  // ENTRADAS
+  // ==========================================
+  if PodeEntrar then
+  begin
+    // --- Compra só se o candle anterior foi verde ---
+    if (vCorAnterior = clGreen) and not MercadoEsticado and (BOS_Alta or (HL and CandleAlta)) then
+    begin
+      if (close > MME9) and (CandleAlta) then
+      begin
+        Entry := close;
+        Stop  := MinLow - StopOffset;
+        Target := Entry + (Entry - Stop) * RiskRR;
+
+        BuyAtMarket();
+        SellToCoverStop(Stop, 1);
+        SellToCoverStop(Target, 1);
+
+        PlotText("BUY BOS", date, time, low, rgb(0,200,0));
+      end;
+    end;
+
+    // --- Venda só se o candle anterior foi vermelho ---
+    if (vCorAnterior = clRed) and not MercadoEsticado and (BOS_Baixa or (LH and CandleBaixa)) then
+    begin
+      if (close < MME9) and (CandleBaixa) then
+      begin
+        Entry := close;
+        Stop  := MaxHigh + StopOffset;
+        Target := Entry - (Stop - Entry) * RiskRR;
+
+        SellShortAtMarket();
+        SellShortStop(Stop, 1);
+        SellShortStop(Target, 1);
+
+        PlotText("SELL BOS", date, time, high, rgb(200,0,0));
+      end;
+    end;
+  end;
+
+end;
